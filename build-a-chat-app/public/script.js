@@ -1,79 +1,85 @@
-const statusDot = document.getElementById('status-dot');
-const statusText = document.getElementById('status');
-const messages = document.getElementById('messages');
-const usernameInput = document.getElementById('username-input');
-const messageInput = document.getElementById('message-input');
-const connectBtn = document.getElementById('connect-btn');
-const sendBtn = document.getElementById('send-btn');
 
-let socket = null;
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { WebSocketServer } from 'ws';
 
-function appendMessage({ type, username, text }) {
-  const el = document.createElement('div');
-  el.classList.add('msg', type);
-  if (type === 'chat') {
-    el.innerHTML = `<span class="username">${escapeHtml(username)}:</span>${escapeHtml(text)}`;
-  } else {
-    el.textContent = text;
-  }
-  messages.appendChild(el);
-  messages.scrollTop = messages.scrollHeight;
-}
+const PORT = 3001;
 
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-function setConnected(connected) {
-  statusDot.className = connected ? 'connected' : 'disconnected';
-  statusText.textContent = connected ? 'Connected' : 'Disconnected';
-  messageInput.disabled = !connected;
-  sendBtn.disabled = !connected;
-  connectBtn.textContent = connected ? 'Disconnect' : 'Connect';
-  usernameInput.disabled = connected;
-}
+// 1. Create the HTTP server
+const server = http.createServer((req, res) => {
+  fs.readFile(
+    path.join(__dirname, 'public', 'index.html'),
+    (err, data) => {
+      if (err) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Error loading page');
+        return;
+      }
 
-connectBtn.addEventListener('click', () => {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.close();
-    return;
-  }
-  const username = usernameInput.value.trim() || 'Anonymous';
-  socket = new WebSocket(`ws://localhost:3001?username=${encodeURIComponent(username)}`);
-
-  socket.onopen = () => setConnected(true);
-
-  socket.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      appendMessage(data);
-    } catch {
-      // ignore malformed messages
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(data);
     }
-  };
-
-  socket.onclose = () => {
-    setConnected(false);
-    socket = null;
-  };
-
-  socket.onerror = () => {
-    setConnected(false);
-  };
+  );
 });
 
-function sendMessage() {
-  const text = messageInput.value.trim();
-  const username = usernameInput.value.trim() || 'Anonymous';
-  if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({ username, text }));
-  messageInput.value = '';
+// 2. Create the WebSocket server
+const wss = new WebSocketServer({ server });
+
+// Helper function to broadcast messages to all connected clients
+function broadcast(message) {
+  const data = JSON.stringify(message);
+
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(data);
+    }
+  });
 }
 
-sendBtn.addEventListener('click', sendMessage);
-messageInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendMessage();
+// 3. Handle WebSocket connections
+wss.on('connection', (socket, req) => {
+  // 4. Get the username from the URL
+  const username = new URL(
+    req.url,
+    'http://localhost'
+  ).searchParams.get('username');
+
+  // Broadcast the join message
+  broadcast({
+    type: 'system',
+    text: `${username} joined`
+  });
+
+  // 5. Handle incoming chat messages
+  socket.on('message', (message) => {
+    try {
+      const { username, text } = JSON.parse(message.toString());
+
+      broadcast({
+        type: 'chat',
+        username,
+        text
+      });
+    } catch (error) {
+      console.error('Invalid message:', error.message);
+    }
+  });
+
+  // 6. Handle client disconnection
+  socket.on('close', () => {
+    broadcast({
+      type: 'system',
+      text: `${username} left`
+    });
+  });
+});
+
+// 7. Start the server
+server.listen(PORT, () => {
+  console.log('Chat server running at http://localhost:3001');
 });
